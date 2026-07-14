@@ -1,0 +1,25 @@
+{
+  "type": "object",
+  "properties": {
+    "api_keys": {
+      "type": "array",
+      "title": "API Keys",
+      "items": {"type": "string"},
+      "default": [],
+      "description": "Cursor 平台 API 密钥列表"
+    },
+    "x_is_human": {
+      "type": "string",
+      "title": "X-Is-Human Header",
+      "default": "",
+      "description": "Cursor x-is-human 请求头值"
+    },
+    "session_cookie": {
+      "type": "string",
+      "title": "Session Cookie",
+      "default": "",
+      "description": "Cursor 会话 Cookie"
+    }
+  },
+  "required": ["api_keys"]
+}
