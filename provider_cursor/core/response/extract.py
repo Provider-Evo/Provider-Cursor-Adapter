@@ -5,6 +5,51 @@ from __future__ import annotations
 from typing import Dict, List, Optional
 
 
+class _ScanState:
+    """顶层扫描过程中的可变状态（字符串/深度追踪）。"""
+
+    __slots__ = ("in_string", "escape", "quote", "depth_curly", "depth_square")
+
+    def __init__(self) -> None:
+        self.in_string = False
+        self.escape = False
+        self.quote: Optional[str] = None
+        self.depth_curly = 0
+        self.depth_square = 0
+
+
+def _advance_in_string(ch: str, state: _ScanState) -> None:
+    """在字符串内部处理转义与引号闭合，更新 state。"""
+    if state.escape:
+        state.escape = False
+    elif ch == "\\":
+        state.escape = True
+    elif ch == state.quote:
+        state.in_string = False
+        state.quote = None
+
+
+def _advance_balanced_array(
+    ch: str,
+    state: _ScanState,
+    depth: int,
+) -> "tuple[int, bool]":
+    """扫描数组配平中的单字符，返回 (新 depth, 是否已闭合)。"""
+    if state.in_string:
+        _advance_in_string(ch, state)
+        return depth, False
+    if ch in ("'", '"'):
+        state.in_string = True
+        state.quote = ch
+        return depth, False
+    if ch == "[":
+        return depth + 1, False
+    if ch != "]":
+        return depth, False
+    new_depth = depth - 1
+    return new_depth, new_depth == 0
+
+
 def extract_balanced_array(text: str, start_index: int) -> str:
     """从指定位置提取平衡的数组文本（处理嵌套和字符串内的括号）。
 
@@ -23,33 +68,38 @@ def extract_balanced_array(text: str, start_index: int) -> str:
 
     i = start_index
     depth = 0
-    in_string = False
-    escape = False
-    quote: Optional[str] = None
+    state = _ScanState()
 
     while i < len(text):
-        ch = text[i]
-        if in_string:
-            if escape:
-                escape = False
-            elif ch == "\\":
-                escape = True
-            elif ch == quote:
-                in_string = False
-                quote = None
-        else:
-            if ch in ("'", '"'):
-                in_string = True
-                quote = ch
-            elif ch == "[":
-                depth += 1
-            elif ch == "]":
-                depth -= 1
-                if depth == 0:
-                    return text[start_index:i + 1]
+        depth, closed = _advance_balanced_array(text[i], state, depth)
+        if closed:
+            return text[start_index:i + 1]
         i += 1
 
     raise ValueError("数组未闭合")
+
+
+def _split_object_at_curly(
+    ch: str,
+    state: _ScanState,
+    obj_start: Optional[int],
+    i: int,
+    array_text: str,
+    objs: List[str],
+) -> Optional[int]:
+    """处理 ``{``/``}`` 深度，闭合时追加对象片段。"""
+    if ch == "{":
+        if state.depth_curly == 0:
+            obj_start = i
+        state.depth_curly += 1
+        return obj_start
+    if ch != "}":
+        return obj_start
+    state.depth_curly -= 1
+    if state.depth_curly == 0 and obj_start is not None:
+        objs.append(array_text[obj_start:i + 1])
+        return None
+    return obj_start
 
 
 def split_top_level_objects(array_text: str) -> List[str]:
@@ -70,45 +120,165 @@ def split_top_level_objects(array_text: str) -> List[str]:
     objs: List[str] = []
     i = 1
     n = len(array_text)
-    in_string = False
-    escape = False
-    quote: Optional[str] = None
-    depth_curly = 0
+    state = _ScanState()
     obj_start: Optional[int] = None
 
     while i < n - 1:
         ch = array_text[i]
-        if in_string:
-            if escape:
-                escape = False
-            elif ch == "\\":
-                escape = True
-            elif ch == quote:
-                in_string = False
-                quote = None
+        if state.in_string:
+            _advance_in_string(ch, state)
+        elif ch in ("'", '"'):
+            state.in_string = True
+            state.quote = ch
         else:
-            if ch in ("'", '"'):
-                in_string = True
-                quote = ch
-            elif ch == "{":
-                if depth_curly == 0:
-                    obj_start = i
-                depth_curly += 1
-            elif ch == "}":
-                depth_curly -= 1
-                if depth_curly == 0 and obj_start is not None:
-                    objs.append(array_text[obj_start:i + 1])
-                    obj_start = None
+            obj_start = _split_object_at_curly(ch, state, obj_start, i, array_text, objs)
         i += 1
 
     return objs
 
 
+def _skip_ws(text: str, i: int, n: int) -> int:
+    """跳过 \\t\\r\\n 空白字符，返回新位置。"""
+    while i < n and text[i] in "\t\r\n":
+        i += 1
+    return i
+
+
+def _parse_quoted_string(text: str, i: int, n: int, quote_ch: str) -> "tuple[str, int]":
+    """解析从 i（指向引号后第一个字符）开始的带引号字符串。
+
+    Returns:
+        (字符串内容, 结束后的位置)。若未闭合，位置停在 n。
+    """
+    buf: List[str] = []
+    escape = False
+    while i < n:
+        c = text[i]
+        if escape:
+            buf.append(c)
+            escape = False
+        elif c == "\\":
+            escape = True
+        elif c == quote_ch:
+            i += 1
+            break
+        else:
+            buf.append(c)
+        i += 1
+    return "".join(buf), i
+
+
+def _advance_balanced_char(
+    c: str,
+    state: _ScanState,
+    open_ch: str,
+    close_ch: str,
+    depth: int,
+) -> int:
+    """处理配平扫描中的单个字符，返回更新后的 depth。"""
+    if state.in_string:
+        _advance_in_string(c, state)
+        return depth
+    if c in ("'", '"'):
+        state.in_string = True
+        state.quote = c
+        return depth
+    if c == open_ch:
+        return depth + 1
+    if c == close_ch:
+        return depth - 1
+    return depth
+
+
+def _parse_balanced(text: str, start: int, n: int, open_ch: str, close_ch: str) -> int:
+    """从 start（指向 open_ch）开始扫描配平括号，返回闭合括号后的位置。"""
+    depth = 1
+    i = start + 1
+    state = _ScanState()
+    while i < n and depth > 0:
+        depth = _advance_balanced_char(text[i], state, open_ch, close_ch, depth)
+        i += 1
+    return i
+
+
+def _parse_key(obj_text: str, i: int, n: int) -> "tuple[Optional[str], int]":
+    """解析字段名（带引号或裸标识符），返回 (key 或 None, 新位置)。"""
+    ch = obj_text[i]
+    if ch in ("'", '"'):
+        key, j = _parse_quoted_string(obj_text, i + 1, n, ch)
+        if j >= n:
+            return None, n
+        return key, j
+
+    j = i
+    while j < n and (obj_text[j].isalnum() or obj_text[j] in "_$."):
+        j += 1
+    if j == i:
+        return None, i + 1
+    return obj_text[i:j], j
+
+
+def _parse_value(obj_text: str, i: int, n: int) -> "tuple[str, int]":
+    """解析字段值（字符串/对象/数组/裸值），返回 (原始字符串值, 新位置)。"""
+    ch = obj_text[i]
+    if ch in ("'", '"'):
+        value, j = _parse_quoted_string(obj_text, i + 1, n, ch)
+        return value, j
+    if ch == "{":
+        j = _parse_balanced(obj_text, i, n, "{", "}")
+        return obj_text[i:j], j
+    if ch == "[":
+        j = _parse_balanced(obj_text, i, n, "[", "]")
+        return obj_text[i:j], j
+
+    start = i
+    while i < n and obj_text[i] not in ",}":
+        i += 1
+    return obj_text[start:i].strip(), i
+
+
+def _consume_field(obj_text: str, i: int, n: int, result: Dict[str, str]) -> int:
+    """解析一个 "key:value" 字段并写入 result，返回解析后的新位置。"""
+    key, i = _parse_key(obj_text, i, n)
+    if key is None:
+        return i
+
+    i = _skip_ws(obj_text, i, n)
+    if i >= n or obj_text[i] != ":":
+        return i
+    i += 1
+    i = _skip_ws(obj_text, i, n)
+    if i >= n:
+        return n
+
+    value, i = _parse_value(obj_text, i, n)
+    result[key] = value
+    return i
+
+
+def _advance_depth(ch: str, state: _ScanState) -> bool:
+    """处理括号深度追踪，命中括号字符时返回 True。"""
+    if ch in ("'", '"'):
+        state.in_string = True
+        state.quote = ch
+        return True
+    if ch == "{":
+        state.depth_curly += 1
+        return True
+    if ch == "}":
+        state.depth_curly -= 1
+        return True
+    if ch == "[":
+        state.depth_square += 1
+        return True
+    if ch == "]":
+        state.depth_square -= 1
+        return True
+    return False
+
+
 def parse_top_level_fields(obj_text: str) -> Dict[str, str]:
     """只解析对象第一层字段，返回字段名到原始字符串值的映射。
-
-    豁免说明：本函数为完整的解析器 dispatch 逻辑，包含多层嵌套的
-    状态机（字符串解析、深度追踪、多类型值处理），天然不可拆分。
 
     Args:
         obj_text: 形如 '{key:"val",...}' 的对象文本。
@@ -119,178 +289,24 @@ def parse_top_level_fields(obj_text: str) -> Dict[str, str]:
     result: Dict[str, str] = {}
     i = 1
     n = len(obj_text)
-    in_string = False
-    escape = False
-    quote: Optional[str] = None
-    depth_curly = 0
-    depth_square = 0
+    state = _ScanState()
 
     while i < n - 1:
         ch = obj_text[i]
-        if in_string:
-            if escape:
-                escape = False
-            elif ch == "\\":
-                escape = True
-            elif ch == quote:
-                in_string = False
-                quote = None
+        if state.in_string:
+            _advance_in_string(ch, state)
             i += 1
             continue
 
-        if ch in ("'", '"'):
-            in_string = True
-            quote = ch
+        if _advance_depth(ch, state):
             i += 1
             continue
 
-        if ch == "{":
-            depth_curly += 1
-            i += 1
-            continue
-        if ch == "}":
-            depth_curly -= 1
-            i += 1
-            continue
-        if ch == "[":
-            depth_square += 1
-            i += 1
-            continue
-        if ch == "]":
-            depth_square -= 1
-            i += 1
-            continue
-
-        if depth_curly == 0 and depth_square == 0:
+        if state.depth_curly == 0 and state.depth_square == 0:
             if ch in "\t\r\n,":
                 i += 1
                 continue
-
-            key: Optional[str] = None
-            if ch in ("'", '"'):
-                q = ch
-                j = i + 1
-                esc = False
-                buf: List[str] = []
-                while j < n:
-                    c = obj_text[j]
-                    if esc:
-                        buf.append(c)
-                        esc = False
-                    elif c == "\\":
-                        esc = True
-                    elif c == q:
-                        break
-                    else:
-                        buf.append(c)
-                    j += 1
-                if j >= n:
-                    break
-                key = "".join(buf)
-                i = j + 1
-            else:
-                j = i
-                while j < n and (obj_text[j].isalnum() or obj_text[j] in "_$."):
-                    j += 1
-                if j == i:
-                    i += 1
-                    continue
-                key = obj_text[i:j]
-                i = j
-
-            while i < n and obj_text[i] in "\t\r\n":
-                i += 1
-            if i >= n or obj_text[i] != ":":
-                continue
-            i += 1
-            while i < n and obj_text[i] in "\t\r\n":
-                i += 1
-            if i >= n:
-                break
-
-            if obj_text[i] in ("'", '"'):
-                q2 = obj_text[i]
-                i += 1
-                buf2: List[str] = []
-                esc2 = False
-                while i < n:
-                    c2 = obj_text[i]
-                    if esc2:
-                        buf2.append(c2)
-                        esc2 = False
-                    elif c2 == "\\":
-                        esc2 = True
-                    elif c2 == q2:
-                        i += 1
-                        break
-                    else:
-                        buf2.append(c2)
-                    i += 1
-                result[key] = "".join(buf2)
-                continue
-
-            if obj_text[i] == "{":
-                start = i
-                dep = 1
-                i += 1
-                iss = False
-                esc3 = False
-                iq: Optional[str] = None
-                while i < n and dep > 0:
-                    c3 = obj_text[i]
-                    if iss:
-                        if esc3:
-                            esc3 = False
-                        elif c3 == "\\":
-                            esc3 = True
-                        elif c3 == iq:
-                            iss = False
-                            iq = None
-                    else:
-                        if c3 in ("'", '"'):
-                            iss = True
-                            iq = c3
-                        elif c3 == "{":
-                            dep += 1
-                        elif c3 == "}":
-                            dep -= 1
-                    i += 1
-                result[key] = obj_text[start:i]
-                continue
-
-            if obj_text[i] == "[":
-                start2 = i
-                dep2 = 1
-                i += 1
-                iss2 = False
-                esc4 = False
-                iq2: Optional[str] = None
-                while i < n and dep2 > 0:
-                    c4 = obj_text[i]
-                    if iss2:
-                        if esc4:
-                            esc4 = False
-                        elif c4 == "\\":
-                            esc4 = True
-                        elif c4 == iq2:
-                            iss2 = False
-                            iq2 = None
-                    else:
-                        if c4 in ("'", '"'):
-                            iss2 = True
-                            iq2 = c4
-                        elif c4 == "[":
-                            dep2 += 1
-                        elif c4 == "]":
-                            dep2 -= 1
-                    i += 1
-                result[key] = obj_text[start2:i]
-                continue
-
-            start3 = i
-            while i < n and obj_text[i] not in ",}":
-                i += 1
-            result[key] = obj_text[start3:i].strip()
+            i = _consume_field(obj_text, i, n, result)
             continue
 
         i += 1

@@ -11,12 +11,12 @@ from typing import Any, AsyncGenerator, Dict, List, Optional, Union
 
 import aiohttp
 
-from src.core.dispatch.candidate import Candidate
+from src.core.dispatch.cand import Candidate
 from src.core.utils.compat.models_cache import ModelsCache
 from src.foundation.logger import get_logger
 from provider_sdk.extensions.platform.adapter import PlatformAdapter
 
-from ..constants import CAPS, MODELS, FETCH_MODELS_ENABLED, MODEL_FETCH_INTERVAL
+from ..consts import CAPS, MODELS, FETCH_MODELS_ENABLED, MODEL_FETCH_INTERVAL
 from .client import CursorClient
 
 logger = get_logger(__name__)
@@ -92,8 +92,7 @@ class CursorAdapter(PlatformAdapter):
         self._refresh_task = asyncio.ensure_future(self._background_init())
 
     async def _background_init(self) -> None:
-        """后台初始化：完成耗时操作后持续刷新。
-        """
+        """后台初始化：完成耗时操作后持续刷新。"""
         try:
             await self._client.background_setup()
         except Exception as exc:
@@ -198,8 +197,7 @@ class CursorAdapter(PlatformAdapter):
             yield chunk
 
     async def close(self) -> None:
-        """关闭适配器，停止后台刷新任务，释放资源。
-        """
+        """关闭适配器，停止后台刷新任务，释放资源。"""
         if self._refresh_task is not None and not self._refresh_task.done():
             self._refresh_task.cancel()
             try:

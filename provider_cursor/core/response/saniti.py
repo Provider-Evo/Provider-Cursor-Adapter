@@ -13,25 +13,8 @@ _CLAUDE_IDENTITY_RESPONSE: str = (
 )
 
 
-def sanitize_response(text: str) -> str:
-    """清洗响应中的 Cursor 身份引用，替换为 Claude。
-
-    从 handler.ts sanitizeResponse() 完整移植，覆盖英文和中文两套规则。
-
-    豁免说明：本函数为大量正则替换规则的集合，每条规则对应一个特定的
-    Cursor 身份注入模式。规则之间相互独立，按业务职责已归类到
-    英文身份替换、英文话题替换、中文替换、工具清理、注入检测等区块，
-    天然不可进一步拆分。
-
-    Args:
-        text: 原始响应文本。
-
-    Returns:
-        清洗后的文本。
-    """
-    result = text
-
-    # English identity replacements
+def _sanitize_english_identity(result: str) -> str:
+    """替换英文身份引用（Cursor -> Claude）。"""
     result = re.sub(
         r"I\s+am\s+(?:a\s+)?(?:support\s+)?assistant\s+for\s+Cursor",
         "I am Claude, an AI assistant by Anthropic",
@@ -57,8 +40,11 @@ def sanitize_response(text: str) -> str:
         "I am Claude, running on Anthropic's infrastructure",
         result, flags=re.I,
     )
+    return result
 
-    # English topic refusal replacements
+
+def _sanitize_topic_refusal_phrases(result: str) -> str:
+    """替换英文话题拒答表述（第一批：助手职责/话题范围表述）。"""
     result = re.sub(
         r"(?:help\s+with\s+)?coding\s+and\s+Cursor\s+IDE\s+questions",
         "help with a wide range of tasks",
@@ -99,6 +85,11 @@ def sanitize_response(text: str) -> str:
         "feel free to ask me anything",
         result, flags=re.I,
     )
+    return result
+
+
+def _sanitize_topic_refusal_boundaries(result: str) -> str:
+    """替换英文话题拒答表述（第二批：Cursor 功能/文档边界表述）。"""
     result = re.sub(
         r"questions\s+about\s+Cursor(?:'s)?\s+(?:features|editor|IDE|pricing|the\s+AI)",
         "your questions",
@@ -136,8 +127,18 @@ def sanitize_response(text: str) -> str:
     )
     result = re.sub(r"(?:\s+or|\s+and)\s+Cursor(?![\w])", "", result, flags=re.I)
     result = re.sub(r"Cursor(?:\s+or|\s+and)\s+", "", result, flags=re.I)
+    return result
 
-    # Chinese replacements
+
+def _sanitize_english_topic_refusal(result: str) -> str:
+    """替换英文话题拒答/工具边界表述。"""
+    result = _sanitize_topic_refusal_phrases(result)
+    result = _sanitize_topic_refusal_boundaries(result)
+    return result
+
+
+def _sanitize_chinese_identity(result: str) -> str:
+    """替换中文身份/系统归属引用（第一批）。"""
     result = re.sub(
         r"我是\s*Cursor\s*的?\s*支持助手",
         "我是Claude，由Anthropic开发的AI助手",
@@ -176,6 +177,11 @@ def sanitize_response(text: str) -> str:
     result = re.sub(r"故障排除等", "等各种问题", result)
     result = re.sub(r"我的职责是帮助你解答", "我可以帮助你解答", result)
     result = re.sub(r"如果你有关于\s*Cursor\s*的问题", "如果你有任何问题", result)
+    return result
+
+
+def _sanitize_chinese_topic_refusal(result: str) -> str:
+    """替换中文话题拒答表述（第二批）。"""
     result = re.sub(
         r"这个问题与\s*(?:Cursor\s*或?\s*)?(?:软件开发|编程|代码|开发)\s*无关[^。\n]*[。，,]?\s*",
         "",
@@ -199,8 +205,18 @@ def sanitize_response(text: str) -> str:
     )
     result = re.sub(r"(?:与|和|或)\s*Cursor\s*(?:相关|有关)", "", result)
     result = re.sub(r"Cursor\s*(?:相关|有关)\s*(?:或|和|的)", "", result)
+    return result
 
-    # Tool availability claim cleanup
+
+def _sanitize_chinese(result: str) -> str:
+    """替换中文身份/话题引用（Cursor -> Claude）。"""
+    result = _sanitize_chinese_identity(result)
+    result = _sanitize_chinese_topic_refusal(result)
+    return result
+
+
+def _sanitize_tool_claims(result: str) -> str:
+    """清理关于可用工具数量/名称的错误声明。"""
     result = re.sub(
         r"(?:I\s+)?(?:only\s+)?have\s+(?:access\s+to\s+)?(?:two|2)\s+tools?[^.]*\.",
         "",
@@ -243,18 +259,24 @@ def sanitize_response(text: str) -> str:
         flags=re.I,
     )
     result = re.sub(r"[^。\n]*当前环境.*?只有.*?工具[^。\n]*[。]?\s*", "", result)
+    return result
 
-    # Prompt injection accusation → full replacement
-    if re.search(
-        r"prompt\s+injection|social\s+engineering"
-        r"|I\s+need\s+to\s+stop\s+and\s+flag"
-        r"|What\s+I\s+will\s+not\s+do",
-        result,
-        re.I,
-    ):
-        return _CLAUDE_IDENTITY_RESPONSE
 
-    # Cursor support assistant context leak
+def _has_prompt_injection_accusation(result: str) -> bool:
+    """检测是否触发了提示注入指控，需整体替换为固定身份回复。"""
+    return bool(
+        re.search(
+            r"prompt\s+injection|social\s+engineering"
+            r"|I\s+need\s+to\s+stop\s+and\s+flag"
+            r"|What\s+I\s+will\s+not\s+do",
+            result,
+            re.I,
+        )
+    )
+
+
+def _sanitize_context_leak(result: str) -> str:
+    """清理 Cursor 支持助手上下文泄露相关表述。"""
     result = re.sub(
         r"I\s+apologi[sz]e\s*[-–—]?\s*it\s+appears\s+I[''']?m\s+currently\s+in\s+the\s+Cursor"
         r"[\s\S]*?(?:available|context)[.!]?\s*",
@@ -296,6 +318,34 @@ def sanitize_response(text: str) -> str:
         flags=re.I,
     )
     result = re.sub(r"I\s+need\s+to\s+stop\s+this[.!]\s*", "", result, flags=re.I)
+    return result
+
+
+def sanitize_response(text: str) -> str:
+    """清洗响应中的 Cursor 身份引用，替换为 Claude。
+
+    从 handler.ts sanitizeResponse() 完整移植，覆盖英文和中文两套规则。
+
+    豁免说明：本函数按业务职责编排为若干子函数（英文身份、英文话题、中文、
+    工具边界声明、提示注入指控、上下文泄露），主体仅负责按顺序调用。
+
+    Args:
+        text: 原始响应文本。
+
+    Returns:
+        清洗后的文本。
+    """
+    result = text
+
+    result = _sanitize_english_identity(result)
+    result = _sanitize_english_topic_refusal(result)
+    result = _sanitize_chinese(result)
+    result = _sanitize_tool_claims(result)
+
+    if _has_prompt_injection_accusation(result):
+        return _CLAUDE_IDENTITY_RESPONSE
+
+    result = _sanitize_context_leak(result)
 
     return result
 
