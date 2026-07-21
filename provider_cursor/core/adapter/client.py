@@ -7,6 +7,8 @@ from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple, Union
 
 import aiohttp
 
+from provider_sdk.model_ids import ModelIdRegistry
+
 from src.core.dispatch.cand import Candidate, make_id
 from src.foundation.logger import get_logger
 
@@ -39,6 +41,8 @@ class CursorClient:
 
     def __init__(self) -> None:
         self._session: Optional[aiohttp.ClientSession] = None
+        self._model_registry = ModelIdRegistry("cursor")
+        self._model_registry.load()
         self._models: List[str] = []
         self._candidates: List[Candidate] = []
         self._api_keys: List[str] = []
@@ -86,12 +90,18 @@ class CursorClient:
                     "cursor 获取模型 JS 失败: HTTP {}".format(resp.status)
                 )
             text = await resp.text()
-        return parse_models_from_js(text)
+        upstream = parse_models_from_js(text)
+        if upstream:
+            self._models = self._model_registry.register_many(upstream)
+        return list(self._models)
+
+    def get_models(self) -> List[str]:
+        return list(self._models)
 
     def update_models(self, models: List[str]) -> None:
-        self._models = list(models)
+        self._models = self._model_registry.register_many(models)
         for cand in self._candidates:
-            cand.models = list(models)
+            cand.models = list(self._models)
 
     def _build_candidate(self, key: str) -> Candidate:
         from ..consts import CAPS
@@ -200,6 +210,7 @@ class CursorClient:
         **kw: Any,
     ) -> AsyncGenerator[Union[str, Dict[str, Any]], None]:
         del thinking, search, kw
+        model = self._model_registry.resolve_upstream(model)
         cursor_messages = build_cursor_messages(messages)
         last_exc: Optional[Exception] = None
 
