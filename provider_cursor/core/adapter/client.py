@@ -12,7 +12,7 @@ from provider_sdk.model_ids import ModelIdRegistry
 from src.core.dispatch.cand import Candidate, make_id
 from src.foundation.logger import get_logger
 
-from ..consts import BASE_URL, CHAT_PATH, MODELS_JS_URL, STREAM_RESUME_PATH
+from ..consts import BASE_URL, CHAT_PATH, MODELS, MODELS_JS_URL, STREAM_RESUME_PATH
 from ..headers import build_headers, build_resume_headers
 from ..payload import build_payload, new_chat_id, new_message_id
 from ..response.convo import build_cursor_messages
@@ -92,14 +92,14 @@ class CursorClient:
             text = await resp.text()
         upstream = parse_models_from_js(text)
         if upstream:
-            self._models = self._model_registry.register_many(upstream)
+            self._models = self._model_registry.register_merge(upstream, fallback=MODELS)
         return list(self._models)
 
     def get_models(self) -> List[str]:
         return list(self._models)
 
     def update_models(self, models: List[str]) -> None:
-        self._models = self._model_registry.register_many(models)
+        self._models = self._model_registry.register_merge(models, fallback=MODELS)
         for cand in self._candidates:
             cand.models = list(self._models)
 
